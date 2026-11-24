@@ -54,16 +54,9 @@ void buildStepQueue(int stepCount) {
 	stepQueue = {}; // shouldnt be necessary, but just in case
 
 	#ifdef GEODE_IS_WINDOWS
+	// refresh at the start of every attempt, since levels can override the movement keybinds
+	if (linuxNative && firstFrame) updateKeybinds();
 	if (linuxNative) linuxCheckInputs();
-	#endif
-	
-	// workaround for a bug in geode 5.3.0 that affects android
-	#ifdef GEODE_IS_ANDROID
-	static double androidFactor = []() {
-		VersionInfo ver = geode::Loader::get()->getVersion();
-		if (ver.getMajor() == 5 && ver.getMinor() <= 3) return 1000.0;
-		else return 1.0;
-	}();
 	#endif
 
 	skipUpdate = false;
@@ -86,7 +79,6 @@ void buildStepQueue(int stepCount) {
 		double elapsedTime = 0.0;
 		while (inputIdx < inputVector.size()) { // while loop to account for multiple inputs on the same step
 			PlayerButtonCommand input = inputVector[inputIdx];
-			GEODE_ANDROID(input.m_timestamp /= androidFactor;)
 
 			if (input.m_timestamp - lastFrameTime < stepDelta * (i + 1)) { // if the next input in the vector happened on the current step, or if its the last step
 				double inputTime = fmod((input.m_timestamp - lastFrameTime), stepDelta) / stepDelta; // proportion of step elapsed at the time the input was made
@@ -128,46 +120,74 @@ Step popStepQueue() {
 
 #ifdef GEODE_IS_WINDOWS
 /*
+GD 2.209 has native keybinds, and its 6 movement actions are ids 10001-10006.
+the order within that range isn't documented anywhere, so match them by name
+and only fall back to the assumed order if the names can't be matched unambiguously
+*/
+std::array<int, 6> resolveMovementActions() {
+	// indexed by GameAction
+	constexpr std::array<int, 6> fallback = {
+		10001, // p1Jump
+		10003, // p1Left
+		10004, // p1Right
+		10002, // p2Jump
+		10005, // p2Left
+		10006  // p2Right
+	};
+
+	std::array<int, 6> resolved{};
+	std::array<bool, 6> found{};
+
+	for (int id = 10001; id <= 10006; id++) {
+		const char* raw = GJKeybindManager::actionToString(id);
+		std::string name = utils::string::toLower(raw ? raw : "");
+		log::info("Movement action {}: \"{}\"", id, name);
+
+		int base;
+		if (name.find("jump") != std::string::npos) base = p1Jump;
+		else if (name.find("left") != std::string::npos) base = p1Left;
+		else if (name.find("right") != std::string::npos) base = p1Right;
+		else return fallback;
+
+		int slot = base + (name.find('2') != std::string::npos ? p2Jump : 0);
+		if (found[slot]) return fallback;
+		found[slot] = true;
+		resolved[slot] = id;
+	}
+
+	return resolved;
+}
+
+/*
 prepare list of keybinds for linux
 */
 void updateKeybinds() {
-	std::array<std::unordered_set<size_t>, 6> binds;
-	std::vector<geode::Keybind> v;
-	Mod* customKeybinds = Loader::get()->getLoadedMod("geode.custom-keybinds");
-	if (!customKeybinds) {
-		static bool checked = 0;
-		if (!checked) log::info("Custom keybinds not loaded.");
-		checked = 1;
-
-		inputBinds[p1Jump] = { KEY_Space, KEY_W, CONTROLLER_A, CONTROLLER_Up, CONTROLLER_RB };
-		inputBinds[p1Left] = { KEY_A, CONTROLLER_Left, CONTROLLER_LTHUMBSTICK_LEFT };
-		inputBinds[p1Right] = { KEY_D, CONTROLLER_Right, CONTROLLER_LTHUMBSTICK_RIGHT };
-
-		inputBinds[p2Jump] = { KEY_Up, CONTROLLER_LB };
-		inputBinds[p2Left] = { KEY_Left, CONTROLLER_RTHUMBSTICK_LEFT };
-		inputBinds[p2Right] = { KEY_Right, CONTROLLER_RTHUMBSTICK_RIGHT };
-		return;
-	}
+	static const std::array<int, 6> actions = resolveMovementActions();
 
 	enableRightClick = Mod::get()->getSettingValue<bool>("right-click");
 
-	v = customKeybinds->getSettingValue<std::vector<geode::Keybind>>("jump-p1");
-	for (int i = 0; i < v.size(); i++) binds[p1Jump].emplace(v[i].key);
+	std::array<std::unordered_set<size_t>, 6> binds;
+	GJKeybindManager* manager = GJKeybindManager::sharedState();
+	bool anyBinds = false;
 
-	v = customKeybinds->getSettingValue<std::vector<geode::Keybind>>("move-left-p1");
-	for (int i = 0; i < v.size(); i++) binds[p1Left].emplace(v[i].key);
+	if (manager) {
+		for (size_t i = 0; i < actions.size(); i++) {
+			for (int chord : manager->chordsForAction(actions[i])) {
+				binds[i].emplace(chord & 0xffff); // upper bits are ctrl/alt/shift flags
+				anyBinds = true;
+			}
+		}
+	}
 
-	v = customKeybinds->getSettingValue<std::vector<geode::Keybind>>("move-right-p1");
-	for (int i = 0; i < v.size(); i++) binds[p1Right].emplace(v[i].key);
+	if (!anyBinds) { // shouldn't happen, but don't leave the player with no inputs
+		binds[p1Jump] = { KEY_Space, KEY_W, CONTROLLER_A, CONTROLLER_Up, CONTROLLER_RB };
+		binds[p1Left] = { KEY_A, CONTROLLER_Left, CONTROLLER_LTHUMBSTICK_LEFT };
+		binds[p1Right] = { KEY_D, CONTROLLER_Right, CONTROLLER_LTHUMBSTICK_RIGHT };
 
-	v = customKeybinds->getSettingValue<std::vector<geode::Keybind>>("jump-p2");
-	for (int i = 0; i < v.size(); i++) binds[p2Jump].emplace(v[i].key);
-
-	v = customKeybinds->getSettingValue<std::vector<geode::Keybind>>("move-left-p2");
-	for (int i = 0; i < v.size(); i++) binds[p2Left].emplace(v[i].key);
-
-	v = customKeybinds->getSettingValue<std::vector<geode::Keybind>>("move-right-p2");
-	for (int i = 0; i < v.size(); i++) binds[p2Right].emplace(v[i].key);
+		binds[p2Jump] = { KEY_Up, CONTROLLER_LB };
+		binds[p2Left] = { KEY_Left, CONTROLLER_RTHUMBSTICK_LEFT };
+		binds[p2Right] = { KEY_Right, CONTROLLER_RTHUMBSTICK_RIGHT };
+	}
 
 	inputBinds = binds;
 }
@@ -226,11 +246,11 @@ int calculateStepCount(double delta, float timewarp, bool forceVanilla) {
 bool safeMode;
 
 class $modify(PlayLayer) {
-	bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
+	bool init(GJGameLevel* level, bool dontCreateObjects) {
+		bool result = PlayLayer::init(level, dontCreateObjects);
 		#ifdef GEODE_IS_WINDOWS
-		if (linuxNative) updateKeybinds(); // update keybinds when you enter a level (for linux)
+		if (linuxNative) updateKeybinds(); // update keybinds when you enter a level (for linux), after init since levels can override them
 		#endif
-		bool result = PlayLayer::init(level, useReplay, dontCreateObjects);
 		if (!softToggle) {
 			this->m_clickBetweenSteps = false;
 			this->m_clickOnSteps = false;
@@ -309,7 +329,7 @@ class $modify(CCScheduler) {
 		onFrameStart();
 		#else
 		if (precisionFix && !linuxNative) {
-			static LARGE_INTEGER* cur = reinterpret_cast<LARGE_INTEGER*>(geode::base::getCocos() + 0x1a84d8);
+			static LARGE_INTEGER* cur = reinterpret_cast<LARGE_INTEGER*>(geode::base::getCocos() + 0x1b2518);
 			currentFrameTime = (double)cur->QuadPart / (double)freq.QuadPart;
 		}
 		#endif
@@ -320,6 +340,10 @@ class $modify(CCScheduler) {
 
 int stepCount;
 bool clickOnSteps = false;
+
+#ifdef GEODE_IS_MACOS
+bool inMacUpdate = false;
+#endif
 
 class $modify(GJBaseGameLayer) {
 	static void onModify(auto& self) {
@@ -360,7 +384,12 @@ class $modify(GJBaseGameLayer) {
 	}
 
 	double getModifiedDelta(float delta) {
-		return calculateSteps(GJBaseGameLayer::getModifiedDelta(delta));
+		double modifiedDelta = GJBaseGameLayer::getModifiedDelta(delta);
+		#ifdef GEODE_IS_MACOS
+		// already handled by the update() hook below; this guards against the call no longer being inlined
+		if (inMacUpdate) return modifiedDelta;
+		#endif
+		return calculateSteps(modifiedDelta);
 	}
 
 #ifdef GEODE_IS_MACOS
@@ -371,7 +400,9 @@ class $modify(GJBaseGameLayer) {
 			calculateSteps(roundf((this->m_extraDelta + (m_resumeTimer <= 0 ? delta : 0.0)) / timewarp) * timewarp);
 		}
 
+		inMacUpdate = true;
 		GJBaseGameLayer::update(delta);
+		inMacUpdate = false;
 	}
 #endif
 };
@@ -548,7 +579,7 @@ class $modify(GJGameLevel) {
 };
 
 float Slerp2D(float p0, float p1, float p2) {
-	auto orig = reinterpret_cast<float (*)(float, float, float)>(geode::base::get() + 0x71ef0);
+	auto orig = reinterpret_cast<float (*)(float, float, float)>(geode::base::get() + 0x84c80);
 	if (shipRotDelta != 0.0f) { // only do anything if Slerp2D is called within PlayerObject::updateShipRotation()
 		shipRotDelta *= p2 * 1024; // p2 is 1/1024 scaled by a constant factor, we need to multiply shipRotDelta by that factor
 		return orig(p0, p1, shipRotDelta);
@@ -569,10 +600,10 @@ void togglePrecisionFix(bool enable) {
 
 	if (!pfPatch) {
 		uintptr_t base = geode::base::getCocos();
-		void* patchAddr = reinterpret_cast<void*>(base + 0x736f6);
-		void* patchAddr2 = reinterpret_cast<void*>(base + 0x73716);
-		void* retAddr = reinterpret_cast<void*>(base + 0x73703);
-		void* currentTimeAddr = reinterpret_cast<void*>(base + 0x1a84d8);
+		void* patchAddr = reinterpret_cast<void*>(base + 0x761b9);
+		void* patchAddr2 = reinterpret_cast<void*>(base + 0x761d9);
+		void* retAddr = reinterpret_cast<void*>(base + 0x761c6);
+		void* currentTimeAddr = reinterpret_cast<void*>(base + 0x1b2518);
 
 		// prevent frame timing from desyncing over time in ccapplication::run
 		geode::ByteVector cave = {
@@ -582,7 +613,7 @@ void togglePrecisionFix(bool enable) {
 
 			// grid snap currentTime based on the float version of animation interval
 			0x48, 0x83, 0xC0, 0x0a,                   // add rax,10                               this fixes rounding errors, dont question it
-			0x0F, 0x5A, 0xC7,                         // cvtps2pd xmm0,xmm7
+			0x0F, 0x5A, 0xC6,                         // cvtps2pd xmm0,xmm6
 			0x49, 0xB9, 0,0,0,0,0,0,0,0,              // movabs r9, &freq
 			0xF2, 0x49, 0x0F, 0x2A, 0x09,             // cvtsi2sd xmm1,qword ptr [r9]
 			0xF2, 0x0F, 0x59, 0xC1,                   // mulsd  xmm0,xmm1
@@ -594,7 +625,7 @@ void togglePrecisionFix(bool enable) {
 			0xF2, 0x48, 0x0F, 0x2D, 0xC1,             // cvtsd2si rax,xmm1
 
 			// fix precision issue in deltaTime calculation (supplemented by pfPatch2)
-			0x4D, 0x8B, 0x21,                         // mov r12,QWORD PTR [r9]
+			0x49, 0x8B, 0x39,                         // mov rdi,QWORD PTR [r9]
 
 			// move corrected currentTime value into relevant locations
 			0x9D,                                     // popfq
@@ -604,7 +635,7 @@ void togglePrecisionFix(bool enable) {
 			// restore previous state
 			0x0F, 0x57, 0xC0,                         // xorps xmm0, xmm0
 			0x0F, 0x57, 0xC9,                         // xorps xmm1, xmm1
-			0xF2, 0x48, 0x0F, 0x2A, 0x44, 0x24, 0x68, // cvtsi2sd xmm0, [rsp+0x68]
+			0xF2, 0x48, 0x0F, 0x2A, 0x44, 0x24, 0x60, // cvtsi2sd xmm0, [rsp+0x60]
 			0x49, 0xB9, 0,0,0,0,0,0,0,0,              // movabs r9, retAddr
 			0x41, 0xFF, 0xE1                          // jmp r9
 		};
@@ -650,13 +681,13 @@ void togglePrecisionFix(bool enable) {
 
 void togglePhysicsBypass(bool enable) {
 #ifdef GEODE_IS_WINDOWS
-	void* addr = reinterpret_cast<void*>(geode::base::get() + 0x237a91);
+	void* addr = reinterpret_cast<void*>(geode::base::get() + 0x340915);
 
 	static Patch* pbPatch = nullptr;
 	if (!pbPatch) {
 		// mov rcx, &stepCount
-		// mov r11d, dword ptr [rcx]
-		geode::ByteVector bytes = { 0x48, 0xb9, 0, 0, 0, 0, 0, 0, 0, 0, 0x44, 0x8b, 0x19 };
+		// mov edi, dword ptr [rcx]
+		geode::ByteVector bytes = { 0x48, 0xb9, 0, 0, 0, 0, 0, 0, 0, 0, 0x8b, 0x39 };
 		writeAddr(bytes, 2, &stepCount);
 		log::info("Physics bypass patch: {} at {}", bytes, addr);
 		pbPatch = Mod::get()->patch(addr, bytes).unwrap();
@@ -675,7 +706,7 @@ void togglePhysicsBypass(bool enable) {
 
 void toggleMod(bool disable) {
 #if defined(GEODE_IS_WINDOWS)
-	void* addr = reinterpret_cast<void*>(geode::base::get() + 0x622bd0);
+	void* addr = reinterpret_cast<void*>(geode::base::get() + 0x835024);
 
 	static Patch* modPatch = nullptr;
 	if (!modPatch) modPatch = Mod::get()->patch(addr, { 0x29, 0x5c, 0x4f, 0x3f }).unwrap();
@@ -738,7 +769,7 @@ $on_mod(Loaded) {
 
 #ifdef GEODE_IS_WINDOWS
 	(void) Mod::get()->hook(
-		reinterpret_cast<void*>(geode::base::get() + 0x71ef0),
+		reinterpret_cast<void*>(geode::base::get() + 0x84c80),
 		Slerp2D,
 		"Slerp2D",
 		tulip::hook::TulipConvention::Default

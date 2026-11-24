@@ -1,3 +1,9 @@
+# v1.6.0
+
+* Port to GD 2.2091 and Geode 6.0.0
+* Linux (Wine workaround): read keybinds from GD's built-in keybind system instead of Custom Keybinds, including per-level keybind overrides
+* macOS: guard against step calculation running twice per frame
+
 # v1.5.0
 
 * Port to GD 2.2081

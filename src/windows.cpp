@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <atomic>
+#include <Xinput.h> // for the XINPUT_* deadzone constants (no longer pulled in by Geode 6)
 
 LARGE_INTEGER freq;
 
